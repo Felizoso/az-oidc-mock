@@ -107,12 +107,19 @@ const tlsSchema = z.object({
     }
 });
 const loggingLevelSchema = z.enum(["error", "warn", "info", "http", "verbose", "debug", "silly"]);
+const defaultRotatingFileLoggingConfig = {
+    filename: "logs/az-oidc-mock-%DATE%.log",
+    datePattern: "YYYY-MM-DD",
+    maxSize: "20m",
+    maxFiles: "14d",
+    zippedArchive: false
+};
 const rotatingFileLoggingSchema = z.object({
-    filename: z.string().min(1).default("logs/az-oidc-mock-%DATE%.log"),
-    datePattern: z.string().min(1).default("YYYY-MM-DD"),
-    maxSize: z.string().min(1).default("20m"),
-    maxFiles: z.string().min(1).default("14d"),
-    zippedArchive: z.boolean().default(false)
+    filename: z.string().min(1).default(defaultRotatingFileLoggingConfig.filename),
+    datePattern: z.string().min(1).default(defaultRotatingFileLoggingConfig.datePattern),
+    maxSize: z.string().min(1).default(defaultRotatingFileLoggingConfig.maxSize),
+    maxFiles: z.string().min(1).default(defaultRotatingFileLoggingConfig.maxFiles),
+    zippedArchive: z.boolean().default(defaultRotatingFileLoggingConfig.zippedArchive)
 });
 const httpLoggingSchema = z.object({
     host: z.string().min(1),
@@ -139,28 +146,38 @@ const httpLoggingSchema = z.object({
         });
     }
 });
-const loggingSchema = z.discriminatedUnion("transport", [
+const loggingTransportSchema = z.discriminatedUnion("transport", [
+    z.object({ transport: z.literal("console") }).strict(),
+    z.object({
+        transport: z.literal("file"),
+        file: rotatingFileLoggingSchema.default(defaultRotatingFileLoggingConfig)
+    }).strict(),
+    z.object({
+        transport: z.literal("http"),
+        http: httpLoggingSchema
+    }).strict()
+]);
+const singleLoggingSchema = z.discriminatedUnion("transport", [
     z.object({
         transport: z.literal("console"),
         level: loggingLevelSchema.default("debug")
-    }),
+    }).strict(),
     z.object({
         transport: z.literal("file"),
         level: loggingLevelSchema.default("debug"),
-        file: rotatingFileLoggingSchema.default({
-            filename: "logs/az-oidc-mock-%DATE%.log",
-            datePattern: "YYYY-MM-DD",
-            maxSize: "20m",
-            maxFiles: "14d",
-            zippedArchive: false
-        })
-    }),
+        file: rotatingFileLoggingSchema.default(defaultRotatingFileLoggingConfig)
+    }).strict(),
     z.object({
         transport: z.literal("http"),
         level: loggingLevelSchema.default("debug"),
         http: httpLoggingSchema
-    })
+    }).strict()
 ]);
+const multipleLoggingSchema = z.object({
+    level: loggingLevelSchema.default("debug"),
+    transports: z.array(loggingTransportSchema).min(1)
+}).strict();
+const loggingSchema = z.union([singleLoggingSchema, multipleLoggingSchema]);
 const appConfigSchema = z.object({
     port: z.number().int().positive().default(3000),
     baseUrl: z.string().url(),

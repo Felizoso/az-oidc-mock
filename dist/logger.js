@@ -27,25 +27,45 @@ export function createLogger(logging) {
     };
 }
 function configureWinstonLogger(logger, logging) {
-    const activeConfig = logging ?? defaultLoggingConfig;
-    const transport = createTransport(activeConfig);
-    transport.on("error", (error) => {
-        // Report transport failures directly to stderr so they do not recurse through the failed sink.
-        process.stderr.write(`${JSON.stringify({
-            timestamp: new Date().toISOString(),
-            level: "error",
-            message: "logging transport failed",
-            context: {
-                transport: activeConfig.transport,
-                error: error.message
-            }
-        })}\n`);
+    const activeLevel = logging?.level ?? defaultLoggingConfig.level;
+    const transportConfigs = resolveTransportConfigs(logging);
+    const transports = transportConfigs.map((transportConfig) => {
+        const transport = createTransport(transportConfig);
+        transport.on("error", (error) => {
+            // Report transport failures directly to stderr so they do not recurse through the failed sink.
+            process.stderr.write(`${JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                message: "logging transport failed",
+                context: {
+                    transport: transportConfig.transport,
+                    error: error.message
+                }
+            })}\n`);
+        });
+        return transport;
     });
     logger.configure({
-        level: activeConfig.level,
+        level: activeLevel,
         format: createLogFormat(),
-        transports: [transport]
+        transports
     });
+}
+function resolveTransportConfigs(logging) {
+    if (!logging) {
+        return [{ transport: "console" }];
+    }
+    if ("transports" in logging) {
+        return logging.transports;
+    }
+    switch (logging.transport) {
+        case "console":
+            return [{ transport: "console" }];
+        case "file":
+            return [{ transport: "file", file: logging.file }];
+        case "http":
+            return [{ transport: "http", http: logging.http }];
+    }
 }
 function createTransport(logging) {
     switch (logging.transport) {

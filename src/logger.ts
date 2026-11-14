@@ -1,6 +1,6 @@
 import DailyRotateFile from "winston-daily-rotate-file";
 import winston from "winston";
-import type { AppConfig, LoggingConfig } from "./config.js";
+import type { AppConfig, LoggingConfig, LoggingTransportConfig } from "./config.js";
 
 export type Logger = {
   info: (message: string, context?: Record<string, unknown>) => void;
@@ -41,29 +41,51 @@ export function createLogger(logging?: LoggingConfig): Logger {
 }
 
 function configureWinstonLogger(logger: winston.Logger, logging?: LoggingConfig): void {
-  const activeConfig = logging ?? defaultLoggingConfig;
-  const transport = createTransport(activeConfig);
-  transport.on("error", (error: Error) => {
-    // Report transport failures directly to stderr so they do not recurse through the failed sink.
-    process.stderr.write(`${JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "error",
-      message: "logging transport failed",
-      context: {
-        transport: activeConfig.transport,
-        error: error.message
-      }
-    })}\n`);
+  const activeLevel = logging?.level ?? defaultLoggingConfig.level;
+  const transportConfigs = resolveTransportConfigs(logging);
+  const transports = transportConfigs.map((transportConfig) => {
+    const transport = createTransport(transportConfig);
+    transport.on("error", (error: Error) => {
+      // Report transport failures directly to stderr so they do not recurse through the failed sink.
+      process.stderr.write(`${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        message: "logging transport failed",
+        context: {
+          transport: transportConfig.transport,
+          error: error.message
+        }
+      })}\n`);
+    });
+    return transport;
   });
 
   logger.configure({
-    level: activeConfig.level,
+    level: activeLevel,
     format: createLogFormat(),
-    transports: [transport]
+    transports
   });
 }
 
-function createTransport(logging: LoggingConfig) {
+function resolveTransportConfigs(logging?: LoggingConfig): LoggingTransportConfig[] {
+  if (!logging) {
+    return [{ transport: "console" }];
+  }
+  if ("transports" in logging) {
+    return logging.transports;
+  }
+
+  switch (logging.transport) {
+    case "console":
+      return [{ transport: "console" }];
+    case "file":
+      return [{ transport: "file", file: logging.file }];
+    case "http":
+      return [{ transport: "http", http: logging.http }];
+  }
+}
+
+function createTransport(logging: LoggingTransportConfig) {
   switch (logging.transport) {
     case "console":
       return new winston.transports.Console({ stderrLevels: ["error", "warn"] });

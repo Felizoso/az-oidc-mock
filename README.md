@@ -118,56 +118,69 @@ Verbose mode logs request timing and OIDC control-flow events. Token and authori
 
 Winston writes JSON log entries to the console by default. Set `logging.level` to control the minimum severity (`error`, `warn`, `info`, `http`, `verbose`, `debug`, or `silly`). The default `debug` level lets `verbose: true` include request and OIDC detail logs.
 
-To rotate log files daily and by size, select the `file` transport:
+Use `logging.transports` to send each entry to multiple destinations. This example writes to the console and a rotating file; add an HTTP entry to the same array to send it there too:
 
 ```json
 {
   "logging": {
-    "transport": "file",
     "level": "info",
-    "file": {
-      "filename": "logs/az-oidc-mock-%DATE%.log",
-      "datePattern": "YYYY-MM-DD",
-      "maxSize": "20m",
-      "maxFiles": "14d",
-      "zippedArchive": true
-    }
+    "transports": [
+      { "transport": "console" },
+      {
+        "transport": "file",
+        "file": {
+          "filename": "logs/az-oidc-mock-%DATE%.log",
+          "datePattern": "YYYY-MM-DD",
+          "maxSize": "20m",
+          "maxFiles": "14d",
+          "zippedArchive": true
+        }
+      }
+    ]
   }
 }
 ```
 
-`filename` is relative to the process working directory unless it is absolute. Set `maxSize` and `maxFiles` to control size-based rotation and retention.
+The previous single-transport `logging.transport` format remains supported. File logs rotate daily and by size; set `maxSize` and `maxFiles` to control rotation and retention. `filename` is relative to the process working directory unless it is absolute.
 
-To send entries to an HTTP logging endpoint, select the `http` transport:
+To send entries to an HTTP logging endpoint, add an `http` item to the `transports` array:
 
 ```json
 {
   "logging": {
-    "transport": "http",
     "level": "info",
-    "http": {
-      "host": "127.0.0.1",
-      "port": 8080,
-      "path": "/logs",
-      "ssl": false,
-      "headers": { "Authorization": "Bearer replace-me" }
-    }
+    "transports": [
+      {
+        "transport": "http",
+        "http": {
+          "host": "127.0.0.1",
+          "port": 8080,
+          "path": "/logs",
+          "ssl": false,
+          "headers": { "Authorization": "Bearer replace-me" }
+        }
+      }
+    ]
   }
 }
 ```
 
-Basic authentication is optional. Set both `username` and `password` to enable it; omit both to send logs without basic authentication:
+Basic authentication is optional. Set both `username` and `password` in the HTTP transport to enable it; omit both for unauthenticated requests:
 
 ```json
 {
   "logging": {
-    "transport": "http",
-    "http": {
-      "host": "127.0.0.1",
-      "port": 8080,
-      "username": "log-writer",
-      "password": "replace-me"
-    }
+    "transports": [
+      {
+        "transport": "http",
+        "http": {
+          "host": "127.0.0.1",
+          "port": 8080,
+          "username": "log-writer",
+          "password": "replace-me"
+        }
+      }
+    ]
   }
 }
 ```

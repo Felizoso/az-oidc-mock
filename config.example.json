@@ -3,8 +3,10 @@
   "baseUrl": "http://localhost:3000",
   "verbose": false,
   "logging": {
-    "transport": "console",
-    "level": "debug"
+    "level": "debug",
+    "transports": [
+      { "transport": "console" }
+    ]
   },
   "tokenLifetimeSeconds": 3600,
   "refreshTokenLifetimeSeconds": 86400,

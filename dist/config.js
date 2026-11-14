@@ -106,11 +106,67 @@ const tlsSchema = z.object({
         });
     }
 });
+const loggingLevelSchema = z.enum(["error", "warn", "info", "http", "verbose", "debug", "silly"]);
+const rotatingFileLoggingSchema = z.object({
+    filename: z.string().min(1).default("logs/az-oidc-mock-%DATE%.log"),
+    datePattern: z.string().min(1).default("YYYY-MM-DD"),
+    maxSize: z.string().min(1).default("20m"),
+    maxFiles: z.string().min(1).default("14d"),
+    zippedArchive: z.boolean().default(false)
+});
+const httpLoggingSchema = z.object({
+    host: z.string().min(1),
+    port: z.number().int().positive(),
+    path: z.string().startsWith("/").default("/logs"),
+    ssl: z.boolean().default(false),
+    username: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    bearer: z.string().min(1).optional(),
+    headers: z.record(z.string(), z.string()).default({})
+}).superRefine((http, ctx) => {
+    const hasUsername = http.username !== undefined;
+    const hasPassword = http.password !== undefined;
+    if (hasUsername !== hasPassword) {
+        ctx.addIssue({
+            code: "custom",
+            message: "logging.http.username and logging.http.password must be set together"
+        });
+    }
+    if (hasUsername && http.bearer) {
+        ctx.addIssue({
+            code: "custom",
+            message: "Use either logging.http basic authentication or bearer authentication"
+        });
+    }
+});
+const loggingSchema = z.discriminatedUnion("transport", [
+    z.object({
+        transport: z.literal("console"),
+        level: loggingLevelSchema.default("debug")
+    }),
+    z.object({
+        transport: z.literal("file"),
+        level: loggingLevelSchema.default("debug"),
+        file: rotatingFileLoggingSchema.default({
+            filename: "logs/az-oidc-mock-%DATE%.log",
+            datePattern: "YYYY-MM-DD",
+            maxSize: "20m",
+            maxFiles: "14d",
+            zippedArchive: false
+        })
+    }),
+    z.object({
+        transport: z.literal("http"),
+        level: loggingLevelSchema.default("debug"),
+        http: httpLoggingSchema
+    })
+]);
 const appConfigSchema = z.object({
     port: z.number().int().positive().default(3000),
     baseUrl: z.string().url(),
     tls: tlsSchema.optional(),
     verbose: z.boolean().default(false),
+    logging: loggingSchema.optional(),
     tokenLifetimeSeconds: z.number().int().positive().default(3600),
     refreshTokenLifetimeSeconds: z.number().int().positive().default(86400),
     rotateRefreshTokens: z.boolean().default(true),

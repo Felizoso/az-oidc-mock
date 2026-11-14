@@ -31,7 +31,7 @@ const rotationStoreKeyPath = path.join(path.dirname(path.resolve(configPath)), "
 const clientSecretRotationStore = new ClientSecretRotationStore(rotationStorePath, loadOrCreateClientSecretRotationKey(rotationStoreKeyPath, rotationStoreExists));
 clientSecretRotationStore?.synchronizeConfig(config);
 const keys = await createSigningKeys();
-const logger = createLogger();
+const logger = createLogger(config.logging);
 const state = new OidcState(refreshTokenStorePath);
 const passwordStore = new PasswordStore(passwdPath);
 const passkeyStore = new PasskeyStore(passkeyStorePath);
@@ -54,6 +54,14 @@ const app = createApp({
     onConfigSaved: (saved) => {
         config = saved;
         try {
+            logger.configure?.(saved.logging);
+        }
+        catch (error) {
+            logger.error("logging configuration update failed; keeping the previous transport", {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+        try {
             clientSecretRotationStore?.synchronizeConfig(saved);
         }
         catch (error) {
@@ -66,6 +74,15 @@ const app = createApp({
 watchConfig(configPath, (reloaded) => {
     // Hot reload publishes only configs that passed validation.
     config = reloaded;
+    try {
+        logger.configure?.(reloaded.logging);
+    }
+    catch (error) {
+        logger.error("logging configuration reload failed; keeping the previous transport", {
+            configPath,
+            error: error instanceof Error ? error.message : String(error)
+        });
+    }
     try {
         clientSecretRotationStore?.synchronizeConfig(reloaded);
     }

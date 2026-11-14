@@ -114,6 +114,66 @@ OIDC_MOCK_VERBOSE=true pnpm start
 
 Verbose mode logs request timing and OIDC control-flow events. Token and authorization code values are not logged.
 
+## Logging transports
+
+Winston writes JSON log entries to the console by default. Set `logging.level` to control the minimum severity (`error`, `warn`, `info`, `http`, `verbose`, `debug`, or `silly`). The default `debug` level lets `verbose: true` include request and OIDC detail logs.
+
+To rotate log files daily and by size, select the `file` transport:
+
+```json
+{
+  "logging": {
+    "transport": "file",
+    "level": "info",
+    "file": {
+      "filename": "logs/az-oidc-mock-%DATE%.log",
+      "datePattern": "YYYY-MM-DD",
+      "maxSize": "20m",
+      "maxFiles": "14d",
+      "zippedArchive": true
+    }
+  }
+}
+```
+
+`filename` is relative to the process working directory unless it is absolute. Set `maxSize` and `maxFiles` to control size-based rotation and retention.
+
+To send entries to an HTTP logging endpoint, select the `http` transport:
+
+```json
+{
+  "logging": {
+    "transport": "http",
+    "level": "info",
+    "http": {
+      "host": "127.0.0.1",
+      "port": 8080,
+      "path": "/logs",
+      "ssl": false,
+      "headers": { "Authorization": "Bearer replace-me" }
+    }
+  }
+}
+```
+
+Basic authentication is optional. Set both `username` and `password` to enable it; omit both to send logs without basic authentication:
+
+```json
+{
+  "logging": {
+    "transport": "http",
+    "http": {
+      "host": "127.0.0.1",
+      "port": 8080,
+      "username": "log-writer",
+      "password": "replace-me"
+    }
+  }
+}
+```
+
+The HTTP transport also supports `bearer` authentication. Logging settings reload with the rest of `config.json`.
+
 ## Docker
 
 ```bash

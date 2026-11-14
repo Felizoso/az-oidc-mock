@@ -41,7 +41,7 @@ const clientSecretRotationStore = new ClientSecretRotationStore(
 );
 clientSecretRotationStore?.synchronizeConfig(config);
 const keys = await createSigningKeys();
-const logger = createLogger();
+const logger = createLogger(config.logging);
 const state = new OidcState(refreshTokenStorePath);
 const passwordStore = new PasswordStore(passwdPath);
 const passkeyStore = new PasskeyStore(passkeyStorePath);
@@ -64,6 +64,13 @@ const app = createApp({
   onConfigSaved: (saved) => {
     config = saved;
     try {
+      logger.configure?.(saved.logging);
+    } catch (error) {
+      logger.error("logging configuration update failed; keeping the previous transport", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    try {
       clientSecretRotationStore?.synchronizeConfig(saved);
     } catch (error) {
       logger.error("client secret rotation config synchronization failed", {
@@ -76,6 +83,14 @@ const app = createApp({
 watchConfig(configPath, (reloaded) => {
   // Hot reload publishes only configs that passed validation.
   config = reloaded;
+  try {
+    logger.configure?.(reloaded.logging);
+  } catch (error) {
+    logger.error("logging configuration reload failed; keeping the previous transport", {
+      configPath,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   try {
     clientSecretRotationStore?.synchronizeConfig(reloaded);
   } catch (error) {

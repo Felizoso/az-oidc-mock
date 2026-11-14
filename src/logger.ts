@@ -82,6 +82,8 @@ function resolveTransportConfigs(logging?: LoggingConfig): LoggingTransportConfi
       return [{ transport: "file", file: logging.file }];
     case "http":
       return [{ transport: "http", http: logging.http }];
+    case "https":
+      return [{ transport: "https", http: logging.http }];
   }
 }
 
@@ -98,19 +100,27 @@ function createTransport(logging: LoggingTransportConfig) {
         zippedArchive: logging.file.zippedArchive
       });
     case "http":
-      return new winston.transports.Http({
-        host: logging.http.host,
-        port: logging.http.port,
-        path: logging.http.path,
-        ssl: logging.http.ssl,
-        headers: logging.http.headers,
-        ...(logging.http.username
-          ? { auth: { username: logging.http.username, password: logging.http.password } }
-          : logging.http.bearer
-            ? { auth: { bearer: logging.http.bearer } }
-            : {})
-      });
+      return createHttpTransport(logging.http, logging.http.ssl);
+    case "https":
+      return createHttpTransport(logging.http, true);
   }
+}
+
+type HttpLoggingConfig = Extract<LoggingTransportConfig, { transport: "http" | "https" }>["http"];
+
+function createHttpTransport(logging: HttpLoggingConfig, ssl: boolean) {
+  return new winston.transports.Http({
+    host: logging.host,
+    port: logging.port,
+    path: logging.path,
+    ssl,
+    headers: logging.headers,
+    ...(logging.username
+      ? { auth: { username: logging.username, password: logging.password } }
+      : logging.bearer
+        ? { auth: { bearer: logging.bearer } }
+        : {})
+  });
 }
 
 function createLogFormat(): winston.Logform.Format {

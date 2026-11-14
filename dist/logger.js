@@ -65,6 +65,8 @@ function resolveTransportConfigs(logging) {
             return [{ transport: "file", file: logging.file }];
         case "http":
             return [{ transport: "http", http: logging.http }];
+        case "https":
+            return [{ transport: "https", http: logging.http }];
     }
 }
 function createTransport(logging) {
@@ -80,19 +82,24 @@ function createTransport(logging) {
                 zippedArchive: logging.file.zippedArchive
             });
         case "http":
-            return new winston.transports.Http({
-                host: logging.http.host,
-                port: logging.http.port,
-                path: logging.http.path,
-                ssl: logging.http.ssl,
-                headers: logging.http.headers,
-                ...(logging.http.username
-                    ? { auth: { username: logging.http.username, password: logging.http.password } }
-                    : logging.http.bearer
-                        ? { auth: { bearer: logging.http.bearer } }
-                        : {})
-            });
+            return createHttpTransport(logging.http, logging.http.ssl);
+        case "https":
+            return createHttpTransport(logging.http, true);
     }
+}
+function createHttpTransport(logging, ssl) {
+    return new winston.transports.Http({
+        host: logging.host,
+        port: logging.port,
+        path: logging.path,
+        ssl,
+        headers: logging.headers,
+        ...(logging.username
+            ? { auth: { username: logging.username, password: logging.password } }
+            : logging.bearer
+                ? { auth: { bearer: logging.bearer } }
+                : {})
+    });
 }
 function createLogFormat() {
     return winston.format.combine(winston.format.timestamp(), winston.format.errors({ stack: true }), winston.format.json());

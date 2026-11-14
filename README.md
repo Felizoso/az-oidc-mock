@@ -165,6 +165,8 @@ To send entries to an HTTP logging endpoint, add an `http` item to the `transpor
 }
 ```
 
+Use `"transport": "https"` to enable TLS; its port defaults to `443`. The `http` transport defaults to port `80`, and also accepts `"ssl": true` when you want TLS with the `http` transport name.
+
 Basic authentication is optional. Set both `username` and `password` in the HTTP transport to enable it; omit both for unauthenticated requests:
 
 ```json

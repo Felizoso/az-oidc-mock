@@ -121,16 +121,15 @@ const rotatingFileLoggingSchema = z.object({
     maxFiles: z.string().min(1).default(defaultRotatingFileLoggingConfig.maxFiles),
     zippedArchive: z.boolean().default(defaultRotatingFileLoggingConfig.zippedArchive)
 });
-const httpLoggingSchema = z.object({
+const httpLoggingOptionsSchema = z.object({
     host: z.string().min(1),
-    port: z.number().int().positive(),
     path: z.string().startsWith("/").default("/logs"),
-    ssl: z.boolean().default(false),
     username: z.string().min(1).optional(),
     password: z.string().min(1).optional(),
     bearer: z.string().min(1).optional(),
     headers: z.record(z.string(), z.string()).default({})
-}).superRefine((http, ctx) => {
+});
+function validateHttpLoggingAuth(http, ctx) {
     const hasUsername = http.username !== undefined;
     const hasPassword = http.password !== undefined;
     if (hasUsername !== hasPassword) {
@@ -145,7 +144,15 @@ const httpLoggingSchema = z.object({
             message: "Use either logging.http basic authentication or bearer authentication"
         });
     }
-});
+}
+const httpLoggingSchema = httpLoggingOptionsSchema.extend({
+    port: z.number().int().positive().default(80),
+    ssl: z.boolean().default(false)
+}).superRefine(validateHttpLoggingAuth);
+const httpsLoggingSchema = httpLoggingOptionsSchema.extend({
+    port: z.number().int().positive().default(443),
+    ssl: z.literal(true).default(true)
+}).superRefine(validateHttpLoggingAuth);
 const loggingTransportSchema = z.discriminatedUnion("transport", [
     z.object({ transport: z.literal("console") }).strict(),
     z.object({
@@ -155,6 +162,10 @@ const loggingTransportSchema = z.discriminatedUnion("transport", [
     z.object({
         transport: z.literal("http"),
         http: httpLoggingSchema
+    }).strict(),
+    z.object({
+        transport: z.literal("https"),
+        http: httpsLoggingSchema
     }).strict()
 ]);
 const singleLoggingSchema = z.discriminatedUnion("transport", [
@@ -171,6 +182,11 @@ const singleLoggingSchema = z.discriminatedUnion("transport", [
         transport: z.literal("http"),
         level: loggingLevelSchema.default("debug"),
         http: httpLoggingSchema
+    }).strict(),
+    z.object({
+        transport: z.literal("https"),
+        level: loggingLevelSchema.default("debug"),
+        http: httpsLoggingSchema
     }).strict()
 ]);
 const multipleLoggingSchema = z.object({

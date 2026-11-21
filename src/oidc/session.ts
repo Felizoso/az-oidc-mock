@@ -13,6 +13,8 @@ export type SessionUser = {
   authLevel: AuthLevel;
 };
 
+const LOGIN_CSRF_TOKEN_LIFETIME_MS = 30 * 60 * 1000;
+
 /**
  * Reads and verifies the tenant-scoped login session cookie.
  */
@@ -55,6 +57,44 @@ export function setSessionUser(
     path: `/${tenant.tenantId}`,
     maxAge
   });
+}
+
+/**
+ * Issues or reuses a signed tenant-scoped CSRF token for interactive login forms.
+ */
+export function getOrCreateLoginCsrfToken(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  tenant: MockTenant,
+  sessionSecret: string
+): string {
+  const cookieName = loginCsrfCookieName(tenant);
+  const existing = readCookie(req.header("cookie"), cookieName);
+  if (existing && isValidLoginCsrfToken(existing, tenant, sessionSecret)) {
+    return existing;
+  }
+
+  const token = createLoginCsrfToken(tenant, sessionSecret);
+  res.cookie(cookieName, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureRequest(req, config),
+    path: `/${encodeURIComponent(tenant.tenantId)}`,
+    maxAge: LOGIN_CSRF_TOKEN_LIFETIME_MS
+  });
+  return token;
+}
+
+/**
+ * Verifies the hidden login form token against its signed, tenant-scoped cookie.
+ */
+export function verifyLoginCsrfToken(req: Request, tenant: MockTenant, sessionSecret: string): boolean {
+  const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+  const submitted = typeof body.csrf_token === "string" ? body.csrf_token : "";
+  const cookie = readCookie(req.header("cookie"), loginCsrfCookieName(tenant));
+  return submitted.length <= 512 && !!cookie && constantTimeEqual(submitted, cookie) &&
+    isValidLoginCsrfToken(cookie, tenant, sessionSecret);
 }
 
 /**
@@ -128,6 +168,63 @@ function parseCookies(header?: string): Record<string, string> {
       .filter(([key, value]) => key && value)
       .map(([key, value]) => [key, decodeURIComponent(value)])
   );
+}
+
+/**
+ * Reads one cookie without accepting duplicate names or malformed encoding.
+ */
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  let found: string | undefined;
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    if (found !== undefined) return undefined;
+    try {
+      found = decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return found;
+}
+
+/**
+ * Names the tenant-scoped pre-authentication CSRF cookie.
+ */
+function loginCsrfCookieName(tenant: MockTenant): string {
+  return `az_oidc_mock_csrf_${tenant.tenantId}`;
+}
+
+/**
+ * Creates a short-lived HMAC-signed pre-authentication CSRF token.
+ */
+function createLoginCsrfToken(tenant: MockTenant, sessionSecret: string): string {
+  const expiresAt = Date.now() + LOGIN_CSRF_TOKEN_LIFETIME_MS;
+  const nonce = crypto.randomBytes(32).toString("base64url");
+  const payload = `${tenant.tenantId}\n${expiresAt}\n${nonce}`;
+  const signature = crypto.createHmac("sha256", sessionSecret).update(`login-csrf\n${payload}`).digest("base64url");
+  return `v1.${expiresAt}.${nonce}.${signature}`;
+}
+
+/**
+ * Verifies the token's format, lifetime, tenant binding, and HMAC signature.
+ */
+function isValidLoginCsrfToken(token: string, tenant: MockTenant, sessionSecret: string): boolean {
+  if (token.length > 512) return false;
+  const [version, expiryText, nonce, signature, extra] = token.split(".");
+  const expiresAt = Number(expiryText);
+  if (
+    version !== "v1" || extra !== undefined || !/^\d+$/.test(expiryText ?? "") ||
+    !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() ||
+    expiresAt > Date.now() + LOGIN_CSRF_TOKEN_LIFETIME_MS + 1000 ||
+    !/^[A-Za-z0-9_-]{43}$/.test(nonce ?? "") || !/^[A-Za-z0-9_-]{43}$/.test(signature ?? "")
+  ) {
+    return false;
+  }
+  const payload = `${tenant.tenantId}\n${expiresAt}\n${nonce}`;
+  const expected = crypto.createHmac("sha256", sessionSecret).update(`login-csrf\n${payload}`).digest("base64url");
+  return constantTimeEqual(signature, expected);
 }
 
 /**

@@ -11,7 +11,13 @@ import { createTotpSecret, createTotpUri, verifyTotpSecret } from "../oidc/mfa.j
 import type { ClientSecretRotationStore } from "../oidc/client-secret-rotation.js";
 import { createPasskeyChallenge, verifyPasskeyRegistration } from "../oidc/passkeys.js";
 import type { PasswordStore } from "../oidc/passwords.js";
-import { clearSessionUser, getSessionUser, setSessionUser } from "../oidc/session.js";
+import {
+  clearSessionUser,
+  getOrCreateLoginCsrfToken,
+  getSessionUser,
+  setSessionUser,
+  verifyLoginCsrfToken
+} from "../oidc/session.js";
 import type { OidcState } from "../oidc/state.js";
 import { isInactiveRefreshTokenDevice, resolveActiveTokenSubject } from "../oidc/token-subject.js";
 import { createAccessToken, createIdToken } from "../oidc/tokens.js";
@@ -156,6 +162,7 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
             sendAuthorizeError(res, validation.request.redirectUri, validation.request.state, "access_denied", "User no longer exists");
             return;
           }
+          const csrfToken = getOrCreateLoginCsrfToken(req, res, config, tenant, context.sessionSecret);
           const mfa = handleMfaLoginStep({
             tenant,
             user: resolvedSessionUser,
@@ -165,7 +172,8 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
             sessionSecret: context.sessionSecret,
             mfaStore: context.mfaStore,
             config,
-            auth: sessionAuth
+            auth: sessionAuth,
+            csrfToken
           });
           if (!mfa.complete) {
             return;
@@ -199,9 +207,11 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
     }
 
     // No reusable session exists, so render a tenant-specific login experience.
+    const csrfToken = getOrCreateLoginCsrfToken(req, res, config, tenant, context.sessionSecret);
+    res.setHeader("Cache-Control", "no-store");
     res.type("html").send(renderLoginPage(
       tenant,
-      authorizeParamsFromRequest(validation.client, validation.request),
+      authorizeParamsFromRequest(validation.client, validation.request, csrfToken),
       readString(req.query.login_error),
       listEffectiveUsers(config, tenant).map((entry) => entry.user)
     ));
@@ -214,6 +224,11 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
     const config = context.getConfig();
     const tenant = getTenantOr404(config, req, res);
     if (!tenant) return;
+    if (!verifyLoginCsrfToken(req, tenant, context.sessionSecret)) {
+      res.status(403).json({ error: "csrf_failed", error_description: "Login CSRF token is missing or invalid" });
+      return;
+    }
+    const csrfToken = readString(req.body.csrf_token) ?? "";
     context.logger.verbose(config, "login form submitted", { tenantId: tenant.tenantId, clientId: req.body.client_id });
 
     const authorizeQuery = req.body as AuthorizeQuery;
@@ -279,9 +294,10 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
     if (!login.ok) {
       context.logger.warn("login rejected", { tenantId: tenant.tenantId, reason: login.description });
       if (tenant.secure) {
+        res.setHeader("Cache-Control", "no-store");
         res.type("html").status(401).send(renderLoginPage(
           tenant,
-          authorizeParamsFromRequest(validation.client, validation.request),
+          authorizeParamsFromRequest(validation.client, validation.request, csrfToken),
           login.description,
           listEffectiveUsers(config, tenant).map((entry) => entry.user)
         ));
@@ -302,7 +318,8 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
       mfaStore: context.mfaStore,
       challenge,
       config,
-      auth: login.auth
+      auth: login.auth,
+      csrfToken
     });
     if (!mfa.complete) {
       return;
@@ -316,9 +333,10 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
         request: validation.request,
         auth: mfa.auth
       }, context.sessionSecret);
+      res.setHeader("Cache-Control", "no-store");
       res.type("html").send(renderPasskeyPage(tenant, {
         challenge: passkeyChallengeValue,
-        params: authorizeParamsFromRequest(validation.client, validation.request),
+        params: authorizeParamsFromRequest(validation.client, validation.request, csrfToken),
         mandatory: tenant.passkeysMandatory
       }));
       return;
@@ -926,14 +944,16 @@ function handleMfaLoginStep(args: {
   challenge?: MfaChallenge;
   config: AppConfig;
   auth: AuthContext;
+  csrfToken: string;
 }): { complete: true; auth: AuthContext } | { complete: false } {
+  args.res.setHeader("Cache-Control", "no-store");
   const mfaRequiredByRequest = args.validation.request.acr === MFA_ACR && !satisfiesRequestedAcr(args.validation.request, args.auth);
   const mfaEnabled = mfaRequiredByRequest || args.tenant.twoFactorEnabled || args.tenant.twoFactorMandatory;
   if (!mfaEnabled) {
     return { complete: true, auth: args.auth };
   }
 
-  const params = authorizeParamsFromRequest(args.validation.client, args.validation.request);
+  const params = authorizeParamsFromRequest(args.validation.client, args.validation.request, args.csrfToken);
   const body = args.req.body && typeof args.req.body === "object" ? args.req.body as Record<string, unknown> : {};
   const action = readString(body.mfa_action);
   const code = readString(body.mfa_code);
@@ -1110,7 +1130,7 @@ function completeLogin(args: {
 /**
  * Converts a validated authorize request back into hidden login form fields.
  */
-function authorizeParamsFromRequest(client: MockClient, request: ValidatedAuthorizeRequest): Record<string, string> {
+function authorizeParamsFromRequest(client: MockClient, request: ValidatedAuthorizeRequest, csrfToken: string): Record<string, string> {
   return {
     client_id: client.clientId,
     redirect_uri: request.redirectUri,
@@ -1121,7 +1141,8 @@ function authorizeParamsFromRequest(client: MockClient, request: ValidatedAuthor
     device_id: request.deviceId ?? "",
     acr_values: acrValuesFromRequest(request),
     code_challenge: request.codeChallenge ?? "",
-    code_challenge_method: request.codeChallenge ? "S256" : ""
+    code_challenge_method: request.codeChallenge ? "S256" : "",
+    csrf_token: csrfToken
   };
 }
 

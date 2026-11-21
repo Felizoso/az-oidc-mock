@@ -102,6 +102,112 @@ beforeEach(async () => {
   keys = await createSigningKeys();
 });
 
+const csrfTokensByAgent = new WeakMap<object, string>();
+
+function testRequest(app: ReturnType<typeof createApp>) {
+  return wrapLoginCsrf(app, request(app), false);
+}
+
+function testAgent(app: ReturnType<typeof createApp>) {
+  return wrapLoginCsrf(app, request.agent(app), true);
+}
+
+function wrapLoginCsrf<T extends object>(app: ReturnType<typeof createApp>, requester: T, persistent: boolean): T {
+  return new Proxy(requester, {
+    get(target, property, receiver) {
+      if (property === "post") {
+        const post = Reflect.get(target, property, receiver) as (route: string) => unknown;
+        return (route: string) => {
+          const match = /^\/([^/]+)\/login$/.exec(route);
+          if (!match) return post.call(target, route);
+          let body: Record<string, unknown> = {};
+          const chain = {
+            type: (_contentType: string) => chain,
+            send: (value: Record<string, unknown>) => {
+              body = value;
+              return chain;
+            },
+            expect: (status: number) => submitLoginWithCsrf(
+              (persistent ? target : request.agent(app)) as request.Agent,
+              route,
+              decodeURIComponent(match[1]),
+              body,
+              status
+            )
+          };
+          return chain;
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+async function submitLoginWithCsrf(
+  agent: request.Agent,
+  route: string,
+  tenantId: string,
+  body: Record<string, unknown>,
+  status: number
+): Promise<request.Response> {
+  const loginPage = await agent
+    .get(`/${encodeURIComponent(tenantId)}/oauth2/v2.0/authorize`)
+    .query(csrfSeedQuery(tenantId, body));
+  const agentKey = agent as object;
+  let csrfToken = csrfTokensByAgent.get(agentKey);
+  const setCookies: string[] = Array.isArray(loginPage.header["set-cookie"])
+    ? loginPage.header["set-cookie"]
+    : [];
+  const cookieName = `az_oidc_mock_csrf_${tenantId}=`;
+  const csrfCookie = setCookies.find((cookie) => cookie.startsWith(cookieName));
+  if ((loginPage.text ?? "").includes('name="csrf_token"')) {
+    csrfToken = extractInputValue(loginPage.text, "csrf_token");
+  }
+  if (!csrfToken) {
+    csrfToken = csrfCookie?.split(";", 1)[0].slice(cookieName.length);
+  }
+  if (!csrfToken) {
+    throw new Error(`Could not obtain a CSRF token for ${route} (authorize status ${loginPage.status})`);
+  }
+  csrfTokensByAgent.set(agentKey, csrfToken);
+  let loginRequest = agent
+    .post(route)
+    .type("form")
+    .send({ ...body, csrf_token: csrfToken });
+  if (csrfCookie && /;\s*Secure(?:;|$)/i.test(csrfCookie)) {
+    loginRequest = loginRequest.set("cookie", csrfCookie.split(";", 1)[0]);
+  }
+  return loginRequest.expect(status);
+}
+
+function csrfSeedQuery(tenantId: string, body: Record<string, unknown>): Record<string, string> {
+  let query: Record<string, string>;
+  if (tenantId === "contoso") {
+    query = {
+      ...contosoAuthorizeQuery(),
+      code_challenge: "A".repeat(43),
+      code_challenge_method: "S256"
+    };
+  } else if (tenantId === "internal") {
+    query = {
+      response_type: "code",
+      client_id: "internal-admin",
+      redirect_uri: "http://127.0.0.1:3000/internal/admin/callback",
+      scope: "openid profile email",
+      state: "csrf-seed",
+      code_challenge: "SKabm3h9Q0ZwD1I6mQBpUVIW82KrzLnkZ3CJ6QFX7gk",
+      code_challenge_method: "S256"
+    };
+  } else {
+    query = authorizeQuery();
+  }
+  for (const key of ["state", "acr_values"]) {
+    if (typeof body[key] === "string") query[key] = body[key] as string;
+  }
+  return query;
+}
+
 describe("Azure OIDC mock", () => {
   it("prevents responses from being embedded in frames", async () => {
     const app = createApp({ config, keys, logger: silentLogger });
@@ -110,6 +216,45 @@ describe("Azure OIDC mock", () => {
 
     expect(response.headers["content-security-policy"]).toBe("frame-ancestors 'none'");
     expect(response.headers["x-frame-options"]).toBe("DENY");
+  });
+
+  it("requires a valid cookie-bound CSRF token for OIDC login form submissions", async () => {
+    const app = createApp({ config, keys, logger: silentLogger, sessionSecret: "csrf-test-secret" });
+    const browser = testAgent(app);
+    const loginPage = await browser
+      .get("/common/oauth2/v2.0/authorize")
+      .query(authorizeQuery())
+      .expect(200);
+    const csrfToken = extractInputValue(loginPage.text, "csrf_token");
+    const cookieName = "az_oidc_mock_csrf_common=";
+    const setCookies = loginPage.header["set-cookie"] as string[];
+    const csrfCookie = setCookies.find((cookie) => cookie.startsWith(cookieName));
+    expect(csrfCookie).toContain("HttpOnly");
+    expect(csrfCookie).toContain("SameSite=Lax");
+    expect(csrfCookie).toContain("Path=/common");
+    const cookiePair = csrfCookie!.split(";", 1)[0];
+    const form = { ...authorizeQuery(), user_sub: "user-1" };
+
+    await request(app)
+      .post("/common/login")
+      .type("form")
+      .send(form)
+      .expect(403);
+
+    await request(app)
+      .post("/common/login")
+      .set("cookie", cookiePair)
+      .type("form")
+      .send({ ...form, csrf_token: `${csrfToken}x` })
+      .expect(403);
+
+    const tamperedToken = `${csrfToken.slice(0, -1)}${csrfToken.endsWith("a") ? "b" : "a"}`;
+    await request(app)
+      .post("/common/login")
+      .set("cookie", `${cookieName}${tamperedToken}`)
+      .type("form")
+      .send({ ...form, csrf_token: tamperedToken })
+      .expect(403);
   });
 
   it("serves tenant-specific discovery metadata", async () => {
@@ -202,7 +347,7 @@ describe("Azure OIDC mock", () => {
 
   it("serves the self-contained admin UI after internal tenant login", async () => {
     const app = createApp({ config: adminConfig(), keys, logger: silentLogger });
-    const agent = request.agent(app);
+    const agent = testAgent(app);
 
     const login = await agent
       .post("/internal/login")
@@ -236,7 +381,7 @@ describe("Azure OIDC mock", () => {
 
   it("allows a shared internal admin user with the internal_admin claim", async () => {
     const app = createApp({ config: sharedInternalAdminConfig({ claim: true }), keys, logger: silentLogger });
-    const agent = request.agent(app);
+    const agent = testAgent(app);
 
     const login = await agent
       .post("/internal/login")
@@ -258,7 +403,7 @@ describe("Azure OIDC mock", () => {
 
   it("allows a shared internal admin user with the internal-admin role", async () => {
     const app = createApp({ config: sharedInternalAdminConfig({ role: true }), keys, logger: silentLogger });
-    const agent = request.agent(app);
+    const agent = testAgent(app);
 
     const login = await agent
       .post("/internal/login")
@@ -280,7 +425,7 @@ describe("Azure OIDC mock", () => {
   it("rejects shared internal admin users without the admin role or claim", async () => {
     const app = createApp({ config: sharedInternalAdminConfig(), keys, logger: silentLogger });
 
-    const login = await request(app)
+    const login = await testRequest(app)
       .post("/internal/login")
       .type("form")
       .send({
@@ -315,7 +460,7 @@ describe("Azure OIDC mock", () => {
           currentConfig = saved;
         }
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       const login = await agent
         .post("/internal/login")
@@ -364,7 +509,7 @@ describe("Azure OIDC mock", () => {
           currentConfig = saved;
         }
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await loginInternalAdmin(agent);
       const masked = await agent.get("/internal/admin/api/config").expect(200);
@@ -388,7 +533,7 @@ describe("Azure OIDC mock", () => {
         logger: silentLogger,
         passwordStore
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await loginInternalAdmin(agent);
       const csrfToken = await adminCsrfToken(agent);
@@ -422,7 +567,7 @@ describe("Azure OIDC mock", () => {
       logger: silentLogger,
       passkeyStore
     });
-    const agent = request.agent(app);
+    const agent = testAgent(app);
 
     await loginInternalAdmin(agent);
     const csrfToken = await adminCsrfToken(agent);
@@ -454,7 +599,7 @@ describe("Azure OIDC mock", () => {
       mfaStore,
       passkeyStore
     });
-    const agent = request.agent(app);
+    const agent = testAgent(app);
 
     await loginInternalAdmin(agent);
     const api = await agent.get("/internal/admin/api/config").expect(200);
@@ -469,7 +614,7 @@ describe("Azure OIDC mock", () => {
       const currentConfig = adminConfig();
       await fs.writeFile(configPath, `${JSON.stringify(currentConfig, null, 2)}\n`, "utf8");
       const app = createApp({ config: currentConfig, keys, logger: silentLogger, configPath });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await loginInternalAdmin(agent);
       const rejected = await agent.put("/internal/admin/api/config").send({ config: currentConfig }).expect(403);
@@ -495,7 +640,7 @@ describe("Azure OIDC mock", () => {
           currentConfig = saved;
         }
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       const login = await agent
         .post("/internal/login")
@@ -570,7 +715,7 @@ describe("Azure OIDC mock", () => {
     expect(getResponse.body.error).toBe("invalid_request");
     expect(getResponse.header.location).toBeUndefined();
 
-    const postResponse = await request(app)
+    const postResponse = await testRequest(app)
       .post("/internal/login")
       .type("form")
       .send({ ...requestParams, user_sub: "admin-1" })
@@ -619,7 +764,7 @@ describe("Azure OIDC mock", () => {
       .expect(200);
     expect(loginPage.text).toContain("Alice Example");
 
-    const login = await request(app)
+    const login = await testRequest(app)
       .post("/common/login")
       .type("form")
       .send({ ...authorizeQuery(), user_sub: "user-1" })
@@ -665,7 +810,7 @@ describe("Azure OIDC mock", () => {
         logger: silentLogger,
         passwordStore: new PasswordStore(passwdPath)
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       const loginPage = await agent
         .get("/common/oauth2/v2.0/authorize")
@@ -738,7 +883,7 @@ describe("Azure OIDC mock", () => {
         .expect(200);
       expect(forged.text).toContain('name="password"');
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -775,7 +920,7 @@ describe("Azure OIDC mock", () => {
         logger: silentLogger,
         passwordStore: new PasswordStore(passwdPath)
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await agent
         .post("/common/login")
@@ -806,7 +951,7 @@ describe("Azure OIDC mock", () => {
         logger: silentLogger,
         passwordStore: new PasswordStore(passwdPath)
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       const login = await agent
         .post("/common/login")
@@ -837,7 +982,7 @@ describe("Azure OIDC mock", () => {
         passwordStore: new PasswordStore(passwdPath)
       });
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -861,7 +1006,7 @@ describe("Azure OIDC mock", () => {
         passwordStore: new PasswordStore(passwdPath)
       });
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -892,7 +1037,7 @@ describe("Azure OIDC mock", () => {
         .expect(200);
       expect(page.text).toContain("id=\"passkey-login\"");
 
-      const setup = await request(app)
+      const setup = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -909,7 +1054,7 @@ describe("Azure OIDC mock", () => {
       expect(options.body.publicKey.user.name).toBe("alice@example.test");
       expect(options.body.registrationToken).toEqual(expect.any(String));
 
-      const continued = await request(app)
+      const continued = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), passkey_challenge: challenge, passkey_action: "continue" })
@@ -933,7 +1078,7 @@ describe("Azure OIDC mock", () => {
         sessionSecret: "passkey-test-secret"
       });
 
-      const setup = await request(app)
+      const setup = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -974,7 +1119,7 @@ describe("Azure OIDC mock", () => {
       .expect(200);
     expect(loginPage.text).toContain("Alice Example");
 
-    const login = await request(app)
+    const login = await testRequest(app)
       .post("/contoso/login")
       .type("form")
       .send({ ...contosoAuthorizeQuery(), user_sub: "user-1" })
@@ -1023,7 +1168,7 @@ describe("Azure OIDC mock", () => {
       .expect(200);
     expect(loginPage.text).toContain("Alice Example");
 
-    await request(app)
+    await testRequest(app)
       .post("/contoso/login")
       .type("form")
       .send({ ...contosoAuthorizeQuery(), user_sub: "user-1" })
@@ -1053,13 +1198,13 @@ describe("Azure OIDC mock", () => {
         passwordStore: new PasswordStore(passwdPath)
       });
 
-      await request(app)
+      await testRequest(app)
         .post("/contoso/login")
         .type("form")
         .send({ ...contosoAuthorizeQuery(), username: "alice@example.test", password: "wrong" })
         .expect(401);
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/contoso/login")
         .type("form")
         .send({ ...contosoAuthorizeQuery(), username: "alice@example.test", password: "source-secret" })
@@ -1084,7 +1229,7 @@ describe("Azure OIDC mock", () => {
         sessionSecret: "mfa-test-secret"
       });
 
-      const choice = await request(app)
+      const choice = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -1092,7 +1237,7 @@ describe("Azure OIDC mock", () => {
       expect(choice.text).toContain("Set up 2FA");
       expect(choice.text).toContain("Continue without 2FA");
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), mfa_challenge: extractInputValue(choice.text, "mfa_challenge"), mfa_action: "continue" })
@@ -1118,7 +1263,7 @@ describe("Azure OIDC mock", () => {
         sessionSecret: "mfa-test-secret"
       });
 
-      const setup = await request(app)
+      const setup = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
@@ -1127,14 +1272,14 @@ describe("Azure OIDC mock", () => {
       expect(setup.text).not.toContain("Continue without 2FA");
 
       const secret = extractSecret(setup.text);
-      const failed = await request(app)
+      const failed = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), mfa_challenge: extractInputValue(setup.text, "mfa_challenge"), mfa_action: "setup", mfa_code: "000000" })
         .expect(401);
       expect(failed.text).toContain("Authenticator code is invalid");
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), mfa_challenge: extractInputValue(failed.text, "mfa_challenge"), mfa_action: "setup", mfa_code: createTotpCode(secret) })
@@ -1163,20 +1308,20 @@ describe("Azure OIDC mock", () => {
         sessionSecret: "mfa-test-secret"
       });
 
-      const verify = await request(app)
+      const verify = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "secret" })
         .expect(200);
       expect(verify.text).toContain("Authenticator Code");
 
-      await request(app)
+      await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), mfa_challenge: extractInputValue(verify.text, "mfa_challenge"), mfa_action: "verify", mfa_code: "000000" })
         .expect(401);
 
-      const login = await request(app)
+      const login = await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), mfa_challenge: extractInputValue(verify.text, "mfa_challenge"), mfa_action: "verify", mfa_code: createTotpCode(secret) })
@@ -1203,7 +1348,7 @@ describe("Azure OIDC mock", () => {
         mfaStore,
         sessionSecret: "mfa-step-up-secret"
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await agent
         .post("/common/login")
@@ -1274,7 +1419,7 @@ describe("Azure OIDC mock", () => {
         mfaStore,
         sessionSecret: "legacy-mfa-step-up-secret"
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await agent
         .post("/common/login")
@@ -1336,7 +1481,7 @@ describe("Azure OIDC mock", () => {
         mfaStore,
         sessionSecret: "shared-mfa-step-up-secret"
       });
-      const agent = request.agent(app);
+      const agent = testAgent(app);
 
       await agent
         .post("/contoso/login")
@@ -1409,7 +1554,7 @@ describe("Azure OIDC mock", () => {
       expect(contents).toContain("common:user-1:pbkdf2-sha256$");
       expect(contents).not.toContain("new-secret");
 
-      await request(app)
+      await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "new-secret" })
@@ -1422,7 +1567,7 @@ describe("Azure OIDC mock", () => {
         .expect(200);
       expect(deletion.body).toMatchObject({ deleted: true, tenant_id: "common", user_sub: "user-1" });
 
-      await request(app)
+      await testRequest(app)
         .post("/common/login")
         .type("form")
         .send({ ...authorizeQuery(), username: "alice@example.test", password: "new-secret" })
@@ -1606,7 +1751,7 @@ describe("Azure OIDC mock", () => {
 
   it("renews tokens with a refresh token and rotates it", async () => {
     const app = createApp({ config, keys, logger: silentLogger });
-    const login = await request(app)
+    const login = await testRequest(app)
       .post("/common/login")
       .type("form")
       .send({ ...authorizeQuery(), user_sub: "user-1" })
@@ -1848,7 +1993,7 @@ async function issueAccessToken(app: ReturnType<typeof createApp>): Promise<stri
 }
 
 async function issueTokenSet(app: ReturnType<typeof createApp>): Promise<request.Response> {
-  const login = await request(app)
+  const login = await testRequest(app)
     .post("/common/login")
     .type("form")
     .send({ ...authorizeQuery(), user_sub: "user-1" })

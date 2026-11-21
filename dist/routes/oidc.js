@@ -54,14 +54,15 @@ export function registerOidcRoutes(app, context) {
             prompt: req.query.prompt,
             enableSessions
         });
-        const validation = validateAuthorizeRequest(tenant, req.query, context.clientSecretRotationStore);
+        const authorizeQuery = req.query;
+        const validation = validateAuthorizeRequest(config, tenant, authorizeQuery, context.clientSecretRotationStore);
         if (!validation.ok) {
             context.logger.warn("authorize request rejected", {
                 tenantId: tenant.tenantId,
                 error: validation.error,
                 description: validation.description
             });
-            sendAuthorizeError(res, req.query.redirect_uri, req.query.state, validation.error, validation.description);
+            sendAuthorizeError(res, registeredAuthorizeErrorRedirectUri(config, tenant, authorizeQuery), authorizeQuery.state, validation.error, validation.description);
             return;
         }
         // A mandatory passkey policy also applies to existing sessions, including sessions created before policy changes.
@@ -124,14 +125,15 @@ export function registerOidcRoutes(app, context) {
         if (!tenant)
             return;
         context.logger.verbose(config, "login form submitted", { tenantId: tenant.tenantId, clientId: req.body.client_id });
-        const validation = validateAuthorizeRequest(tenant, req.body, context.clientSecretRotationStore);
+        const authorizeQuery = req.body;
+        const validation = validateAuthorizeRequest(config, tenant, authorizeQuery, context.clientSecretRotationStore);
         if (!validation.ok) {
             context.logger.warn("login request rejected", {
                 tenantId: tenant.tenantId,
                 error: validation.error,
                 description: validation.description
             });
-            sendAuthorizeError(res, req.body.redirect_uri, req.body.state, validation.error, validation.description);
+            sendAuthorizeError(res, registeredAuthorizeErrorRedirectUri(config, tenant, authorizeQuery), authorizeQuery.state, validation.error, validation.description);
             return;
         }
         // Optional passkey setup can be skipped only when tenant policy allows it.
@@ -326,7 +328,7 @@ export function registerOidcRoutes(app, context) {
         if (!tenant)
             return;
         const body = readObjectBody(req);
-        const validation = validateAuthorizeRequest(tenant, body, context.clientSecretRotationStore);
+        const validation = validateAuthorizeRequest(config, tenant, body, context.clientSecretRotationStore);
         const username = readString(body.username)?.toLowerCase();
         const user = username ? resolveEffectiveUserByUsername(config, tenant, username) : undefined;
         const credentials = user ? context.passkeyStore.list(user.homeTenant.tenantId, user.user.sub) : [];
@@ -562,9 +564,32 @@ function createDiscoveryDocument(config, tenant) {
     };
 }
 /**
+ * Returns a redirect URI only when the client owns the registered callback.
+ */
+function registeredAuthorizeErrorRedirectUri(config, tenant, query) {
+    if (typeof query.client_id !== "string" || typeof query.redirect_uri !== "string") {
+        return undefined;
+    }
+    const client = findClient(tenant, query.client_id);
+    if (!client || !isAllowedAuthorizeRedirectUri(config, tenant, client, query.redirect_uri)) {
+        return undefined;
+    }
+    return query.redirect_uri;
+}
+/**
+ * Ensures authorize errors can only be sent to a callback owned by this client.
+ */
+function isAllowedAuthorizeRedirectUri(config, tenant, client, redirectUri) {
+    if (tenant.tenantId === "internal" && client.clientId === "internal-admin") {
+        const expectedAdminCallback = `${config.baseUrl.replace(/\/$/, "")}/internal/admin/callback`;
+        return redirectUri === expectedAdminCallback && validateRedirectUri(client, redirectUri);
+    }
+    return validateRedirectUri(client, redirectUri);
+}
+/**
  * Validates an authorize request and normalizes it into internal state.
  */
-function validateAuthorizeRequest(tenant, query, rotationStore) {
+function validateAuthorizeRequest(config, tenant, query, rotationStore) {
     if (query.response_type !== "code") {
         return { ok: false, error: "unsupported_response_type", description: "Only response_type=code is supported" };
     }
@@ -580,7 +605,7 @@ function validateAuthorizeRequest(tenant, query, rotationStore) {
     if (!client.enabled) {
         return { ok: false, error: "unauthorized_client", description: "Client is disabled" };
     }
-    if (!validateRedirectUri(client, redirectUri)) {
+    if (!isAllowedAuthorizeRedirectUri(config, tenant, client, redirectUri)) {
         return { ok: false, error: "invalid_request", description: "redirect_uri is not registered for client" };
     }
     if ((query.code_challenge !== undefined && typeof query.code_challenge !== "string") ||

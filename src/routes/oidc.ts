@@ -124,14 +124,21 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
       enableSessions
     });
 
-    const validation = validateAuthorizeRequest(tenant, req.query as AuthorizeQuery, context.clientSecretRotationStore);
+    const authorizeQuery = req.query as AuthorizeQuery;
+    const validation = validateAuthorizeRequest(config, tenant, authorizeQuery, context.clientSecretRotationStore);
     if (!validation.ok) {
       context.logger.warn("authorize request rejected", {
         tenantId: tenant.tenantId,
         error: validation.error,
         description: validation.description
       });
-      sendAuthorizeError(res, req.query.redirect_uri, req.query.state, validation.error, validation.description);
+      sendAuthorizeError(
+        res,
+        registeredAuthorizeErrorRedirectUri(config, tenant, authorizeQuery),
+        authorizeQuery.state,
+        validation.error,
+        validation.description
+      );
       return;
     }
     // A mandatory passkey policy also applies to existing sessions, including sessions created before policy changes.
@@ -209,14 +216,21 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
     if (!tenant) return;
     context.logger.verbose(config, "login form submitted", { tenantId: tenant.tenantId, clientId: req.body.client_id });
 
-    const validation = validateAuthorizeRequest(tenant, req.body as AuthorizeQuery, context.clientSecretRotationStore);
+    const authorizeQuery = req.body as AuthorizeQuery;
+    const validation = validateAuthorizeRequest(config, tenant, authorizeQuery, context.clientSecretRotationStore);
     if (!validation.ok) {
       context.logger.warn("login request rejected", {
         tenantId: tenant.tenantId,
         error: validation.error,
         description: validation.description
       });
-      sendAuthorizeError(res, req.body.redirect_uri, req.body.state, validation.error, validation.description);
+      sendAuthorizeError(
+        res,
+        registeredAuthorizeErrorRedirectUri(config, tenant, authorizeQuery),
+        authorizeQuery.state,
+        validation.error,
+        validation.description
+      );
       return;
     }
 
@@ -424,7 +438,7 @@ export function registerOidcRoutes(app: Express, context: RouteContext): void {
     const tenant = getTenantOr404(config, req, res);
     if (!tenant) return;
     const body = readObjectBody(req);
-    const validation = validateAuthorizeRequest(tenant, body as AuthorizeQuery, context.clientSecretRotationStore);
+    const validation = validateAuthorizeRequest(config, tenant, body as AuthorizeQuery, context.clientSecretRotationStore);
     const username = readString(body.username)?.toLowerCase();
     const user = username ? resolveEffectiveUserByUsername(config, tenant, username) : undefined;
     const credentials = user ? context.passkeyStore.list(user.homeTenant.tenantId, user.user.sub) : [];
@@ -671,9 +685,45 @@ function createDiscoveryDocument(config: AppConfig, tenant: MockTenant): Record<
 }
 
 /**
+ * Returns a redirect URI only when the client owns the registered callback.
+ */
+function registeredAuthorizeErrorRedirectUri(
+  config: AppConfig,
+  tenant: MockTenant,
+  query: AuthorizeQuery
+): string | undefined {
+  if (typeof query.client_id !== "string" || typeof query.redirect_uri !== "string") {
+    return undefined;
+  }
+
+  const client = findClient(tenant, query.client_id);
+  if (!client || !isAllowedAuthorizeRedirectUri(config, tenant, client, query.redirect_uri)) {
+    return undefined;
+  }
+  return query.redirect_uri;
+}
+
+/**
+ * Ensures authorize errors can only be sent to a callback owned by this client.
+ */
+function isAllowedAuthorizeRedirectUri(
+  config: AppConfig,
+  tenant: MockTenant,
+  client: MockClient,
+  redirectUri: string
+): boolean {
+  if (tenant.tenantId === "internal" && client.clientId === "internal-admin") {
+    const expectedAdminCallback = `${config.baseUrl.replace(/\/$/, "")}/internal/admin/callback`;
+    return redirectUri === expectedAdminCallback && validateRedirectUri(client, redirectUri);
+  }
+  return validateRedirectUri(client, redirectUri);
+}
+
+/**
  * Validates an authorize request and normalizes it into internal state.
  */
 function validateAuthorizeRequest(
+  config: AppConfig,
   tenant: MockTenant,
   query: AuthorizeQuery,
   rotationStore?: ClientSecretRotationStore
@@ -710,7 +760,7 @@ function validateAuthorizeRequest(
   if (!client.enabled) {
     return { ok: false, error: "unauthorized_client", description: "Client is disabled" };
   }
-  if (!validateRedirectUri(client, redirectUri)) {
+  if (!isAllowedAuthorizeRedirectUri(config, tenant, client, redirectUri)) {
     return { ok: false, error: "invalid_request", description: "redirect_uri is not registered for client" };
   }
 

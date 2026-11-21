@@ -528,7 +528,7 @@ describe("Azure OIDC mock", () => {
   it("rejects clients from another tenant", async () => {
     const app = createApp({ config, keys, logger: silentLogger });
 
-    await request(app)
+    const response = await request(app)
       .get("/common/oauth2/v2.0/authorize")
       .query({
         response_type: "code",
@@ -536,8 +536,69 @@ describe("Azure OIDC mock", () => {
         redirect_uri: "http://contoso.test/callback",
         scope: "openid"
       })
-      .expect(302)
-      .expect("location", /error=unauthorized_client/);
+      .expect(400);
+
+    expect(response.body.error).toBe("unauthorized_client");
+    expect(response.header.location).toBeUndefined();
+  });
+
+  it("only redirects authorize errors to the internal admin callback", async () => {
+    const requestParams = {
+      response_type: "code",
+      client_id: "internal-admin",
+      redirect_uri: "https://attacker.test/callback",
+      scope: "openid profile email",
+      state: "attacker-state",
+      code_challenge: "SKabm3h9Q0ZwD1I6mQBpUVIW82KrzLnkZ3CJ6QFX7gk",
+      code_challenge_method: "S256"
+    };
+    const app = createApp({ config: adminConfig(), keys, logger: silentLogger });
+
+    const getResponse = await request(app)
+      .get("/internal/oauth2/v2.0/authorize")
+      .query(requestParams)
+      .expect(400);
+    expect(getResponse.body.error).toBe("invalid_request");
+    expect(getResponse.header.location).toBeUndefined();
+
+    const postResponse = await request(app)
+      .post("/internal/login")
+      .type("form")
+      .send({ ...requestParams, user_sub: "admin-1" })
+      .expect(400);
+    expect(postResponse.body.error).toBe("invalid_request");
+    expect(postResponse.header.location).toBeUndefined();
+
+    const configWithExtraCallback = adminConfig();
+    const internalTenant = configWithExtraCallback.tenants.find((tenant) => tenant.tenantId === "internal");
+    internalTenant?.clients[0]?.redirectUris.push("https://attacker.test/callback");
+    const appWithExtraCallback = createApp({ config: configWithExtraCallback, keys, logger: silentLogger });
+    const extraRegisteredCallback = await request(appWithExtraCallback)
+      .get("/internal/oauth2/v2.0/authorize")
+      .query(requestParams)
+      .expect(400);
+    expect(extraRegisteredCallback.header.location).toBeUndefined();
+
+    const registeredCallbackError = await request(app)
+      .get("/internal/oauth2/v2.0/authorize")
+      .query({
+        ...requestParams,
+        response_type: "token",
+        redirect_uri: "http://127.0.0.1:3000/internal/admin/callback"
+      })
+      .expect(302);
+    const location = new URL(registeredCallbackError.header.location);
+    expect(location.origin).toBe("http://127.0.0.1:3000");
+    expect(location.pathname).toBe("/internal/admin/callback");
+    expect(location.searchParams.get("error")).toBe("unsupported_response_type");
+
+    await request(app)
+      .get("/internal/oauth2/v2.0/authorize")
+      .query({
+        ...requestParams,
+        redirect_uri: "http://127.0.0.1:3000/internal/admin/callback"
+      })
+      .expect(200);
   });
 
   it("exchanges an interactive login authorization code for tokens", async () => {

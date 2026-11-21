@@ -73,6 +73,12 @@ export function createApp({
   };
 
   app.disable("x-powered-by");
+  // Prevent the admin UI and OIDC pages from being embedded by untrusted sites.
+  app.use((_req, res, next) => {
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
   app.set("trust proxy", configuredTrustedProxyHops());
   // Keep form and JSON bodies bounded because config and login endpoints accept user input.
   app.use(express.urlencoded({ extended: false, limit: "100kb" }));

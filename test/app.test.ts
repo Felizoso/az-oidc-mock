@@ -103,6 +103,15 @@ beforeEach(async () => {
 });
 
 describe("Azure OIDC mock", () => {
+  it("prevents responses from being embedded in frames", async () => {
+    const app = createApp({ config, keys, logger: silentLogger });
+
+    const response = await request(app).get("/health").expect(200);
+
+    expect(response.headers["content-security-policy"]).toBe("frame-ancestors 'none'");
+    expect(response.headers["x-frame-options"]).toBe("DENY");
+  });
+
   it("serves tenant-specific discovery metadata", async () => {
     const app = createApp({ config, keys, logger: silentLogger });
 

@@ -191,6 +191,8 @@ The HTTP transport also supports `bearer` authentication. Logging settings reloa
 
 ## Docker
 
+The runtime image runs as UID 1000 (`node`). Make sure a mounted `config.json` is writable by that user; the app writes updated configuration and its signing/session data beside the config file.
+
 ```bash
 docker build -t az-oidc-mock .
 docker run --rm -p 3000:3000 -v ./config.json:/app/config.json az-oidc-mock

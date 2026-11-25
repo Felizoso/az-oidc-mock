@@ -24,6 +24,7 @@ const RESERVED_CLAIMS = new Set([
   "auth_level",
   "auth_original_level",
   "acr",
+  "auth_time",
   "client_info"
 ]);
 
@@ -41,6 +42,8 @@ export type TokenSetInput = {
   acr?: string;
   nonce?: string;
   deviceId?: string;
+  /** Epoch seconds of the last interactive authentication (OIDC Core `auth_time`). */
+  authTime?: number;
 };
 
 export type AccessTokenVerification =
@@ -89,6 +92,9 @@ export async function createIdToken(input: TokenSetInput): Promise<string> {
   }
   if (input.acr) {
     claims.acr = input.acr;
+  }
+  if (input.authTime !== undefined) {
+    claims.auth_time = input.authTime;
   }
 
   return signJwt(claims, input.keys);

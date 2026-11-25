@@ -11,6 +11,8 @@ import { resolveEffectiveUser } from "./users.js";
 export type SessionUser = {
   user: MockUser;
   authLevel: AuthLevel;
+  /** Epoch seconds of the interactive login; missing on cookies issued before auth_time support. */
+  authTime?: number;
 };
 
 const LOGIN_CSRF_TOKEN_LIFETIME_MS = 30 * 60 * 1000;
@@ -34,7 +36,7 @@ export function getSessionUser(
   if (resolvedUser && tenant.passkeysMandatory && !passkeyStore?.isEnrolled(resolvedUser.homeTenant.tenantId, resolvedUser.user.sub)) {
     return undefined;
   }
-  return resolvedUser ? { user: resolvedUser.user, authLevel: session.authLevel } : undefined;
+  return resolvedUser ? { user: resolvedUser.user, authLevel: session.authLevel, authTime: session.authTime } : undefined;
 }
 
 /**
@@ -47,10 +49,11 @@ export function setSessionUser(
   tenant: MockTenant,
   userSub: string,
   authLevel: AuthLevel,
-  sessionSecret: string
+  sessionSecret: string,
+  authTime: number | undefined
 ): void {
   const maxAge = tenant.sessionLifetimeSeconds * 1000;
-  res.cookie(`az_oidc_mock_${tenant.tenantId}`, createSessionCookie(tenant.tenantId, userSub, authLevel, Date.now() + maxAge, sessionSecret), {
+  res.cookie(`az_oidc_mock_${tenant.tenantId}`, createSessionCookie(tenant.tenantId, userSub, authLevel, authTime, Date.now() + maxAge, sessionSecret), {
     httpOnly: true,
     sameSite: "lax",
     secure: isSecureRequest(req, config),
@@ -230,8 +233,15 @@ function isValidLoginCsrfToken(token: string, tenant: MockTenant, sessionSecret:
 /**
  * Creates the signed cookie payload that stores tenant, subject, and expiry.
  */
-function createSessionCookie(tenantId: string, userSub: string, authLevel: AuthLevel, expiresAt: number, sessionSecret: string): string {
-  const payload = base64UrlJson({ tenantId, userSub, authLevel, expiresAt });
+function createSessionCookie(
+  tenantId: string,
+  userSub: string,
+  authLevel: AuthLevel,
+  authTime: number | undefined,
+  expiresAt: number,
+  sessionSecret: string
+): string {
+  const payload = base64UrlJson({ tenantId, userSub, authLevel, authTime, expiresAt });
   const signature = signSessionPayload(payload, sessionSecret);
   return `v1.${payload}.${signature}`;
 }
@@ -239,7 +249,11 @@ function createSessionCookie(tenantId: string, userSub: string, authLevel: AuthL
 /**
  * Verifies the signed session cookie and returns its user and original auth level when valid.
  */
-function verifySessionCookie(cookie: string, tenantId: string, sessionSecret: string): { userSub: string; authLevel: AuthLevel } | undefined {
+function verifySessionCookie(
+  cookie: string,
+  tenantId: string,
+  sessionSecret: string
+): { userSub: string; authLevel: AuthLevel; authTime?: number } | undefined {
   const [version, payload, signature] = cookie.split(".");
   if (version !== "v1" || !payload || !signature) {
     return undefined;
@@ -262,7 +276,8 @@ function verifySessionCookie(cookie: string, tenantId: string, sessionSecret: st
   }
   return {
     userSub: decoded.userSub,
-    authLevel: isAuthLevel(decoded.authLevel) ? decoded.authLevel : "cookie"
+    authLevel: isAuthLevel(decoded.authLevel) ? decoded.authLevel : "cookie",
+    authTime: Number.isSafeInteger(decoded.authTime) ? decoded.authTime as number : undefined
   };
 }
 

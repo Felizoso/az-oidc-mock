@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { decodeJwt } from "jose";
 import request from "supertest";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { loadConfig, parseConfig, watchConfig, type AppConfig } from "../src/config.js";
 import type { Logger } from "../src/logger.js";
@@ -269,6 +269,7 @@ describe("Azure OIDC mock", () => {
     expect(res.body.response_modes_supported).toContain("query");
     expect(res.body.grant_types_supported).toContain("refresh_token");
     expect(res.body.cloud_instance_name).toBe("mock");
+    expect(res.body.claims_supported).toContain("auth_time");
   });
 
   it("serves the Azure v2.0 discovery path that MSAL commonly resolves", async () => {
@@ -1614,6 +1615,7 @@ describe("Azure OIDC mock", () => {
                   scp: "everything",
                   sub: "attacker",
                   tid: "other-tenant",
+                  auth_time: 1,
                   department: "engineering"
                 }
               }
@@ -1643,6 +1645,7 @@ describe("Azure OIDC mock", () => {
     expect(idToken.roles).toEqual(["Admin"]);
     expect(idToken.sub).toBe("user-1");
     expect(idToken.tid).toBe("common");
+    expect(idToken.auth_time).not.toBe(1);
     expect(idToken.department).toBe("engineering");
   });
 
@@ -1963,7 +1966,138 @@ describe("Azure OIDC mock", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  describe("auth_time and max_age", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("includes auth_time in ID tokens and keeps it on refresh", async () => {
+      const app = createApp({ config, keys, logger: silentLogger });
+      const before = Math.floor(Date.now() / 1000);
+      const first = await issueTokenSet(app);
+      const after = Math.floor(Date.now() / 1000);
+      const authTime = decodeJwt(first.body.id_token).auth_time;
+      expect(authTime).toBeGreaterThanOrEqual(before);
+      expect(authTime).toBeLessThanOrEqual(after);
+
+      mockClockAhead(120);
+      const refreshed = await request(app)
+        .post("/common/oauth2/v2.0/token")
+        .type("form")
+        .send({
+          grant_type: "refresh_token",
+          client_id: "local-app",
+          client_secret: "local-secret",
+          refresh_token: first.body.refresh_token
+        })
+        .expect(200);
+      expect(decodeJwt(refreshed.body.id_token).auth_time).toBe(authTime);
+    });
+
+    it("keeps the original auth_time when an existing session satisfies the request", async () => {
+      const app = createApp({ config: sessionConfig(), keys, logger: silentLogger });
+      const agent = testAgent(app);
+      const firstToken = await loginAndRedeem(agent, { ...authorizeQuery(), user_sub: "user-1" });
+      const authTime = decodeJwt(firstToken.body.id_token).auth_time as number;
+
+      mockClockAhead(120);
+      const silent = await agent
+        .get("/common/oauth2/v2.0/authorize")
+        .query({ ...authorizeQuery(), state: "state-2", max_age: "600" })
+        .expect(302);
+      const code = new URL(silent.header.location).searchParams.get("code");
+      expect(code).toBeTruthy();
+      const token = await redeemCode(agent, code);
+      expect(decodeJwt(token.body.id_token).auth_time).toBe(authTime);
+    });
+
+    it("requires a new login when the session is older than max_age", async () => {
+      const app = createApp({ config: sessionConfig(), keys, logger: silentLogger });
+      const agent = testAgent(app);
+      await loginAndRedeem(agent, { ...authorizeQuery(), user_sub: "user-1" });
+
+      mockClockAhead(120);
+      const interactive = await agent
+        .get("/common/oauth2/v2.0/authorize")
+        .query({ ...authorizeQuery(), max_age: "60" })
+        .expect(200);
+      expect(interactive.text).toContain("Alice Example");
+
+      const silent = await agent
+        .get("/common/oauth2/v2.0/authorize")
+        .query({ ...authorizeQuery(), max_age: "60", prompt: "none" })
+        .expect(302);
+      expect(new URL(silent.header.location).searchParams.get("error")).toBe("login_required");
+
+      const zero = await agent
+        .get("/common/oauth2/v2.0/authorize")
+        .query({ ...authorizeQuery(), max_age: "0" })
+        .expect(200);
+      expect(zero.text).toContain("Alice Example");
+    });
+
+    it("issues a fresh auth_time after re-login forced by max_age", async () => {
+      const app = createApp({ config: sessionConfig(), keys, logger: silentLogger });
+      const agent = testAgent(app);
+      const firstToken = await loginAndRedeem(agent, { ...authorizeQuery(), user_sub: "user-1" });
+      const firstAuthTime = decodeJwt(firstToken.body.id_token).auth_time as number;
+
+      mockClockAhead(120);
+      const secondToken = await loginAndRedeem(agent, { ...authorizeQuery(), max_age: "60", user_sub: "user-1" });
+      expect(decodeJwt(secondToken.body.id_token).auth_time).toBeGreaterThanOrEqual(firstAuthTime + 120);
+    });
+
+    it("rejects a malformed max_age", async () => {
+      const app = createApp({ config, keys, logger: silentLogger });
+      for (const maxAge of ["abc", "-1", "1.5"]) {
+        const res = await request(app)
+          .get("/common/oauth2/v2.0/authorize")
+          .query({ ...authorizeQuery(), max_age: maxAge })
+          .expect(302);
+        expect(new URL(res.header.location).searchParams.get("error")).toBe("invalid_request");
+      }
+    });
+  });
 });
+
+function sessionConfig(): AppConfig {
+  return {
+    ...config,
+    tenants: [
+      { ...config.tenants[0], enableSessions: true, sessionLifetimeSeconds: 60 * 60 },
+      config.tenants[1]
+    ]
+  };
+}
+
+function mockClockAhead(seconds: number): void {
+  const realNow = Date.now.bind(Date);
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + seconds * 1000);
+}
+
+async function loginAndRedeem(agent: request.Agent, body: Record<string, string>): Promise<request.Response> {
+  const login = await agent
+    .post("/common/login")
+    .type("form")
+    .send(body)
+    .expect(302);
+  return redeemCode(agent, new URL(login.header.location).searchParams.get("code"));
+}
+
+async function redeemCode(agent: request.Agent, code: string | null): Promise<request.Response> {
+  return agent
+    .post("/common/oauth2/v2.0/token")
+    .type("form")
+    .send({
+      grant_type: "authorization_code",
+      client_id: "local-app",
+      client_secret: "local-secret",
+      code,
+      redirect_uri: "http://app.test/callback"
+    })
+    .expect(200);
+}
 
 function authorizeQuery() {
   return {

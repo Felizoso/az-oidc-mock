@@ -22,6 +22,8 @@ export type AuthorizationCode = AuthorizationRequest & {
   userSub: string;
   authLevel: AuthLevel;
   authOriginalLevel: AuthLevel;
+  /** Epoch seconds of the interactive authentication behind this code; unknown for sessions issued before auth_time support. */
+  authTime?: number;
   expiresAt: number;
 };
 
@@ -36,6 +38,8 @@ export type RefreshToken = {
   nonce?: string;
   deviceId?: string;
   acr?: string;
+  /** Missing on records persisted before auth_time support. */
+  authTime?: number;
   expiresAt: number;
 };
 
@@ -62,7 +66,7 @@ export class OidcState {
   /**
    * Creates a one-time authorization code for a validated authorization request.
    */
-  createCode(request: AuthorizationRequest, userSub: string, auth: AuthContext): string {
+  createCode(request: AuthorizationRequest, userSub: string, auth: AuthContext, authTime?: number): string {
     const code = randomToken();
     this.authorizationCodes.set(code, {
       ...request,
@@ -70,6 +74,7 @@ export class OidcState {
       userSub,
       authLevel: auth.level,
       authOriginalLevel: auth.originalLevel,
+      authTime,
       expiresAt: Date.now() + 5 * 60 * 1000
     });
     return code;
@@ -220,6 +225,7 @@ function normalizeRefreshToken(value: unknown): RefreshToken | undefined {
     (token.nonce === undefined || typeof token.nonce === "string") &&
     (token.deviceId === undefined || typeof token.deviceId === "string") &&
     (token.acr === undefined || typeof token.acr === "string") &&
+    (token.authTime === undefined || Number.isSafeInteger(token.authTime)) &&
     (token.authLevel === undefined || isAuthLevel(token.authLevel)) &&
     (token.authOriginalLevel === undefined || isAuthLevel(token.authOriginalLevel)) &&
     typeof token.expiresAt === "number")) {
@@ -237,6 +243,7 @@ function normalizeRefreshToken(value: unknown): RefreshToken | undefined {
     nonce: token.nonce,
     deviceId: token.deviceId,
     acr: token.acr,
+    authTime: token.authTime,
     expiresAt: token.expiresAt
   };
 }

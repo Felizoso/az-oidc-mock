@@ -312,6 +312,12 @@ The token response includes refresh-token expiry metadata when a refresh token i
 }
 ```
 
+### `auth_time` and `max_age`
+
+ID tokens carry `auth_time`, the time in epoch seconds of the last interactive login. Tokens issued from an existing session and from a refresh token keep the original `auth_time`.
+
+Send `max_age=<seconds>` on the authorize request to require a recent login. If the session login is older, the login page is shown again; with `prompt=none` the request fails with `login_required`. `max_age=0` always forces a new login. A value that is not a non-negative integer is rejected with `invalid_request`.
+
 ## Silent Renewal
 
 ```bash
